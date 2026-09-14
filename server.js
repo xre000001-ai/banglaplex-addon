@@ -408,8 +408,9 @@ async function detectDomain() {
   for (const d of BP_DOMAINS) {
     try {
       // Verify autocomplete API actually works (not just a landing page)
-      const testUrl = `${d}//home/autocompleteajax?term=test`;
-      const data = await fetchJSON(testUrl, 8000);
+      // Use fetchWithFallback since Render IP may be blocked
+      const testText = await fetchWithFallback(`${d}//home/autocompleteajax?term=test`, 10000);
+      let data = null; try { data = JSON.parse(testText); } catch {}
       if (Array.isArray(data) && data.length > 0) {
         BP_BASE = d;
         console.log(`BanglaPlex: ${BP_BASE} (autocomplete OK, ${data.length} results)`);
@@ -543,8 +544,13 @@ async function resolveEmbed(embedUrl) {
 
 async function searchBP(q) {
   if (!BP_BASE) return [];
-  const d = await fetchJSON(`${BP_BASE}//home/autocompleteajax?term=${encodeURIComponent(q)}`, 8000);
-  return Array.isArray(d) ? d.map(i => ({ title: i.title || '', type: i.type || 'Movie', image: i.image || '', url: i.url || '' })) : [];
+  // Use fetchWithFallback (CONNECT tunnel) since Render IP is blocked by BanglaPlex
+  const text = await fetchWithFallback(`${BP_BASE}//home/autocompleteajax?term=${encodeURIComponent(q)}`, 10000);
+  if (!text) return [];
+  try {
+    const d = JSON.parse(text);
+    return Array.isArray(d) ? d.map(i => ({ title: i.title || '', type: i.type || 'Movie', image: i.image || '', url: i.url || '' })) : [];
+  } catch { return []; }
 }
 
 // ─── Stream resolver (direct URLs) ───────────────────────────────────────────
@@ -776,10 +782,11 @@ async function route(req, res) {
       try {
         steps.push({ step: 'domain', bp: BP_BASE });
         
-        // Test autocomplete
+        // Test autocomplete (use tunnel since Render IP is blocked)
         const acUrl = `${BP_BASE}//home/autocompleteajax?term=test`;
         steps.push({ step: 'autocomplete-url', url: acUrl });
-        const acData = await fetchJSON(acUrl, 8000);
+        const acText = await fetchWithFallback(acUrl, 10000);
+        let acData = null; try { acData = JSON.parse(acText); } catch {}
         steps.push({ step: 'autocomplete', ok: Array.isArray(acData), count: acData?.length || 0 });
         
         // Test homepage scrape
