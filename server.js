@@ -200,41 +200,46 @@ function htmlPage(res, body) { res.writeHead(200, { 'Content-Type': 'text/html; 
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
 
+// CORS proxy services — reliable fallback when server IP is blocked
+const CORS_PROXIES = [
+  (url) => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url),
+  (url) => 'https://corsproxy.io/?' + encodeURIComponent(url),
+  (url) => 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(url),
+];
+
 async function fetchWithFallback(url, timeoutMs = 12000) {
   // Try direct first
   let result = await doFetch(url, null, timeoutMs);
   if (result) return result;
 
-  // Try pool proxies
-  for (let attempt = 0; attempt < 3; attempt++) {
+  // Try CORS proxy services (reliable, work from any server)
+  for (const proxyFn of CORS_PROXIES) {
+    result = await doFetch(proxyFn(url), null, timeoutMs);
+    if (result) return result;
+  }
+
+  // Try pool proxies (free, less reliable)
+  for (let attempt = 0; attempt < 2; attempt++) {
     const proxy = poolPick();
     if (!proxy) break;
     const start = Date.now();
-    result = await doFetch(url, proxy, timeoutMs);
-    if (result) {
-      poolNote(proxy, true, Date.now() - start);
-      return result;
-    }
+    result = await doFetch(proxy.replace(/\/+$/, '') + '/' + url, null, timeoutMs);
+    if (result) { poolNote(proxy, true, Date.now() - start); return result; }
     poolNote(proxy, false);
   }
   return null;
 }
 
-async function doFetch(url, proxy, timeoutMs) {
+async function doFetch(url, _unused, timeoutMs) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    // Proxy format: "http://host:port" → route through it
-    const fetchUrl = proxy ? proxy.replace(/\/+$/, '') + '/' + url : url;
-    const r = await fetch(fetchUrl, {
+    const r = await fetch(url, {
       signal: ctrl.signal,
       headers: { 'User-Agent': UA, 'Accept': 'text/html,*/*', 'Accept-Language': 'en-US,en;q=0.5' },
       redirect: 'follow',
     });
-    if (!r.ok) {
-      if (proxy && (r.status === 403 || r.status === 406)) poolNote(proxy, false);
-      return null;
-    }
+    if (!r.ok) return null;
     return await r.text();
   } catch { return null; }
   finally { clearTimeout(t); }
