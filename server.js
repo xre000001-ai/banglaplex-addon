@@ -16,7 +16,7 @@ const { URL } = require('node:url');
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
-const CODE_VERSION = '1.0.0';
+const CODE_VERSION = '1.1.0';
 const PORT = parseInt(process.env.PORT, 10) || 7000;
 const TMDB_BASE = 'https://api.themoviedb.org/3';
 const TMDB_SPACING_MS = 300;
@@ -176,6 +176,90 @@ async function tmdbSearch(type, title, year, key) {
   };
 }
 
+// ─── IMDb Suggestion API (free, no auth, instant) ────────────────────────────
+
+// v2.sg.media-imdb.com/suggestion/x/{query}.json → { d: [{ id, l, y, q }] }
+// id = tt-id, l = title, y = year, q = type (feature, TV series, etc.)
+async function imdbSuggest(query) {
+  if (!query) return null;
+  const letter = query.toLowerCase().replace(/[^a-z0-9]/g, '').charAt(0) || 'x';
+  const url = `https://v2.sg.media-imdb.com/suggestion/${letter}/${encodeURIComponent(query)}.json`;
+  const data = await fetchJSON(url, 6000);
+  if (!data || !Array.isArray(data.d) || !data.d.length) return null;
+  const norm = (s) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const target = norm(query);
+  // Pick best match
+  for (const r of data.d) {
+    if (!r.id || !r.id.startsWith('tt')) continue;
+    const rNorm = norm(r.l || '');
+    if (rNorm === target || rNorm.includes(target) || target.includes(rNorm)) {
+      return { imdbId: r.id, title: r.l || '', year: String(r.y || '') };
+    }
+  }
+  // Fallback: first tt result
+  const first = data.d.find((r) => r.id && r.id.startsWith('tt'));
+  return first ? { imdbId: first.id, title: first.l || '', year: String(first.y || '') } : null;
+}
+
+// ─── Race: fastest resolver ──────────────────────────────────────────────────
+// Races IMDb Suggestion (free) vs TMDB (user key) vs Cinemeta (free).
+// First valid result wins — others are abandoned (no wasted bandwidth).
+
+async function raceResolve(type, ttId, tmdbKey) {
+  // If we have a tt-id, we already know the IMDB id — just need title+year
+  // Race TMDB + Cinemeta (IMDb suggestion doesn't help here — we already have the tt-id)
+  const promises = [];
+  if (tmdbKey) {
+    promises.push(
+      tmdbMeta(type, ttId, tmdbKey).then((m) => m ? { source: 'tmdb', ...m } : null)
+    );
+  }
+  promises.push(
+    fetchJSON(`https://v3-cinemeta.strem.io/meta/${type}/${ttId}.json`, 8000)
+      .then((cm) => {
+        if (cm && cm.meta && cm.meta.name) {
+          return { source: 'cinemeta', title: cm.meta.name, year: String(cm.meta.year || '').slice(0, 4) };
+        }
+        return null;
+      })
+  );
+  // Also try IMDb suggestion with the tt-id itself (sometimes works)
+  promises.push(
+    imdbSuggest(ttId).then((r) => r ? { source: 'imdb', ...r } : null)
+  );
+
+  try {
+    const winner = await Promise.any(promises.filter(Boolean));
+    return winner;
+  } catch {
+    return null; // All failed
+  }
+}
+
+// Race: search by title → best IMDB id (for catalog mapping)
+async function raceSearch(type, title, year, tmdbKey) {
+  const promises = [];
+  // IMDb suggestion (free, fast)
+  promises.push(
+    imdbSuggest(title).then((r) => {
+      if (r && r.imdbId) return { source: 'imdb', imdbId: r.imdbId, title: r.title, year: r.year };
+      return null;
+    })
+  );
+  // TMDB (if key provided)
+  if (tmdbKey) {
+    promises.push(
+      tmdbSearch(type, title, year, tmdbKey).then((m) => m ? { source: 'tmdb', ...m } : null)
+    );
+  }
+  try {
+    const winner = await Promise.any(promises.filter(Boolean));
+    return winner;
+  } catch {
+    return null;
+  }
+}
+
 // ─── BanglaPlex domain detection ─────────────────────────────────────────────
 
 async function detectDomain() {
@@ -305,10 +389,9 @@ async function buildCatalog(tmdbKey) {
   const mapped = [];
   for (const m of movies.slice(0, 25)) {
     let id = `bp_${Buffer.from(m.url).toString('base64url').slice(0, 20)}`;
-    if (tmdbKey) {
-      const meta = await tmdbSearch('movie', m.title, m.year, tmdbKey);
-      if (meta && meta.imdbId) id = meta.imdbId;
-    }
+    // Race: IMDb suggestion (free) vs TMDB (user key) — fastest wins
+    const winner = await raceSearch('movie', m.title, m.year, tmdbKey);
+    if (winner && winner.imdbId) id = winner.imdbId;
     mapped.push({
       id, type: 'movie',
       name: m.title,
@@ -338,19 +421,11 @@ async function resolveStream(type, id, tmdbKey) {
     return [];
   }
 
-  // tt-id → resolve title → search BanglaPlex
+  // tt-id → race resolve title → search BanglaPlex
   let title = '', year = '';
   if (id.startsWith('tt')) {
-    // Try TMDB first (if key provided)
-    if (tmdbKey) {
-      const meta = await tmdbMeta(type, id, tmdbKey);
-      if (meta) { title = meta.title; year = meta.year; }
-    }
-    // Fallback: Cinemeta (free, no key needed)
-    if (!title) {
-      const cm = await fetchJSON(`https://v3-cinemeta.strem.io/meta/${type}/${id}.json`, 8000);
-      if (cm && cm.meta) { title = cm.meta.name || ''; year = String(cm.meta.year || '').slice(0, 4); }
-    }
+    const winner = await raceResolve(type, id, tmdbKey);
+    if (winner) { title = winner.title; year = winner.year; }
   }
   if (!title) return [];
 
@@ -404,25 +479,20 @@ function buildStreamEntry(url, name, year, quality, poster, id) {
 
 function manifest(tmdbKey) {
   return {
-    id: 'community.banglaplex' + (tmdbKey ? '' : '.lite'),
+    id: 'community.banglaplex',
     version: CODE_VERSION,
-    name: 'BanglaPlex' + (tmdbKey ? '' : ' (Lite)'),
-    description: tmdbKey
-      ? 'Bengali, Bollywood, South Indian & Hollywood streams from BanglaPlex. Streams appear on Cinemeta catalogs.'
-      : 'BanglaPlex streams — IMDB catalog mapping requires a TMDB key (free at themoviedb.org).',
-    resources: [
-      'stream',
-      ...(tmdbKey ? [{ name: 'catalog', type: 'movie', id: 'banglaplex' }] : []),
-    ],
+    name: 'BanglaPlex',
+    description: 'Bengali, Bollywood, South Indian & Hollywood streams from BanglaPlex. Uses IMDb suggestion API (free) + optional TMDB key for enhanced mapping.',
+    resources: ['stream', { name: 'catalog', type: 'movie', id: 'banglaplex' }],
     types: ['movie', 'series'],
     idPrefixes: ['tt', 'bp_'],
-    catalogs: tmdbKey ? [{
+    catalogs: [{
       id: 'banglaplex', type: 'movie', name: 'BanglaPlex — Latest',
       extra: [
         { name: 'search', isRequired: false },
         { name: 'genre', isRequired: false, options: ['bengali-movies', 'bollywood-movies', 'south-indian-movies', 'hollywood-movies', 'dual-audio-movies', 'bengali-web-series'] },
       ],
-    }] : [],
+    }],
     behaviorHints: {
       configurable: true,
       configurationRequired: false,
@@ -434,14 +504,13 @@ function manifest(tmdbKey) {
 
 async function handleCatalog(type, id, extra, tmdbKey) {
   if (type !== 'movie' || id !== 'banglaplex') return { metas: [] };
-  if (!tmdbKey) return { metas: [] };
 
   if (extra && extra.search) {
     const results = await searchBanglaPlex(extra.search);
     const metas = [];
     for (const r of results.slice(0, 20)) {
-      const meta = await tmdbSearch('movie', r.title, '', tmdbKey);
-      const mId = (meta && meta.imdbId) ? meta.imdbId : `bp_${Buffer.from(r.url).toString('base64url').slice(0, 20)}`;
+      const winner = await raceSearch('movie', r.title, '', tmdbKey);
+      const mId = (winner && winner.imdbId) ? winner.imdbId : `bp_${Buffer.from(r.url).toString('base64url').slice(0, 20)}`;
       metas.push({ id: mId, type: 'movie', name: r.title, poster: r.image || undefined, posterShape: 'poster' });
     }
     return { metas };
@@ -456,8 +525,8 @@ async function handleCatalog(type, id, extra, tmdbKey) {
   const movies = parseMovieList(html);
   const metas = [];
   for (const m of movies.slice(0, 20)) {
-    const meta = await tmdbSearch('movie', m.title, m.year, tmdbKey);
-    const mId = (meta && meta.imdbId) ? meta.imdbId : `bp_${Buffer.from(m.url).toString('base64url').slice(0, 20)}`;
+    const winner = await raceSearch('movie', m.title, m.year, tmdbKey);
+    const mId = (winner && winner.imdbId) ? winner.imdbId : `bp_${Buffer.from(m.url).toString('base64url').slice(0, 20)}`;
     metas.push({
       id: mId, type: 'movie', name: m.title,
       year: m.year ? parseInt(m.year, 10) : undefined,
@@ -520,6 +589,9 @@ input:focus{border-color:#ff277d}
   <div class="hint">
     Get your <strong>free</strong> key at <a href="https://www.themoviedb.org/settings/api" target="_blank">themoviedb.org/settings/api</a>
     — it takes 2 minutes. The key is encoded in the addon URL and <strong>never stored on the server</strong>.
+    <br><br>
+    <strong>Optional!</strong> Even without a TMDB key, the addon uses IMDb's free suggestion API for title mapping.
+    TMDB key adds: streaming-service badges (Netflix, AMZN…) + catalog browsing.
   </div>
 
   <button class="btn" id="installBtn" onclick="installAddon()">Install in Stremio</button>
