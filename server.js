@@ -818,6 +818,40 @@ async function route(req, res) {
       return json(res, { steps });
     }
     
+    // Blob debug — dumps full decrypted blob for debugging
+    if (pp === '/blob-debug') {
+      try {
+        const embedUrl = u.searchParams.get('embed') || '';
+        const slug = u.searchParams.get('slug') || '';
+        if (!slug && !embedUrl) return jsonErr(res, 400, 'provide ?slug=xxx or ?embed=xxx');
+        
+        let abyssHtml;
+        if (slug) {
+          abyssHtml = await fetchWithFallback(`https://abyssplayer.com/${slug}`, 15000);
+        } else {
+          const embHtml = await fetchWithFallback(embedUrl, 15000);
+          if (!embHtml) return json(res, { error: 'embed fetch failed' });
+          const am = embHtml.match(/abyssplayer\.com\/([a-zA-Z0-9]+)/);
+          if (!am) return json(res, { error: 'no abyssplayer slug' });
+          abyssHtml = await fetchWithFallback(`https://abyssplayer.com/${am[1]}`, 15000);
+        }
+        if (!abyssHtml) return json(res, { error: 'abyssplayer fetch failed' });
+        
+        const dm = abyssHtml.match(/const datas = "([^"]+)"/);
+        if (!dm) return json(res, { error: 'no datas found' });
+        
+        const blob = JSON.parse(Buffer.from(dm[1], 'base64').toString('latin1'));
+        const keyStr = `${blob.user_id}:${blob.slug}:${blob.md5_id}`;
+        const media = await decryptAbyssMedia(blob, keyStr);
+        
+        return json(res, {
+          blob: { user_id: blob.user_id, slug: blob.slug, md5_id: blob.md5_id },
+          keyStr,
+          media: media || 'decrypt failed',
+        });
+      } catch (e) { return json(res, { error: e.message }); }
+    }
+
     if (pp === '/health') return json(res, {
       status: 'ok', version: CODE_VERSION, banglaplex: BP_BASE || '…',
       pool: { size: pool.length, healthy: pool.filter(u => (poolBad[u] || 0) <= Date.now()).length, sticky: poolSticky || 'none', source: MANUAL_PROXIES.length ? 'manual' : 'proxyscrape-free' },
