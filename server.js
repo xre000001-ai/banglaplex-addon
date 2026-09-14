@@ -554,6 +554,47 @@ async function route(req, res) {
     const sm = pp.match(/^\/stream\/(movie|series)\/(.+)\.json$/);
     if (sm) return json(res, { streams: await resolveStream(sm[1], sm[2], tmdbKey) });
 
+    // Debug endpoint
+    if (pp === '/debug') {
+      const steps = [];
+      try {
+        steps.push({ step: 'domain', bp: BP_BASE });
+        
+        // Test autocomplete
+        const acUrl = `${BP_BASE}//home/autocompleteajax?term=test`;
+        steps.push({ step: 'autocomplete-url', url: acUrl });
+        const acData = await fetchJSON(acUrl, 8000);
+        steps.push({ step: 'autocomplete', ok: Array.isArray(acData), count: acData?.length || 0 });
+        
+        // Test homepage scrape
+        const hp = await fetchWithFallback(BP_BASE + '/', 15000);
+        steps.push({ step: 'homepage', ok: !!hp, len: hp?.length || 0 });
+        
+        if (hp) {
+          const movies = parseMovieList(hp);
+          steps.push({ step: 'parse', movies: movies.length, first: movies[0]?.title });
+          
+          // Test search
+          if (movies[0]) {
+            const sr = await searchBP(movies[0].title);
+            steps.push({ step: 'search', ok: sr.length > 0, count: sr.length, first: sr[0]?.title });
+          }
+        }
+        
+        // Test IMDb suggest
+        const imdb = await imdbSuggest('Grihostho');
+        steps.push({ step: 'imdb', ok: !!imdb, id: imdb?.imdbId });
+        
+        // Test Cinemeta
+        const cm = await fetchJSON('https://v3-cinemeta.strem.io/meta/movie/tt31325595.json', 8000);
+        steps.push({ step: 'cinemeta', ok: !!cm?.meta, name: cm?.meta?.name });
+        
+      } catch (e) {
+        steps.push({ step: 'error', msg: e.message });
+      }
+      return json(res, { steps });
+    }
+    
     if (pp === '/health') return json(res, {
       status: 'ok', version: CODE_VERSION, banglaplex: BP_BASE || '…',
       pool: { size: pool.length, healthy: pool.filter(u => (poolBad[u] || 0) <= Date.now()).length, sticky: poolSticky || 'none', source: MANUAL_PROXIES.length ? 'manual' : 'proxyscrape-free' },
