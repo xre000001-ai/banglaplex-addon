@@ -821,24 +821,30 @@ async function route(req, res) {
     // Blob debug — dumps full decrypted blob for debugging
     if (pp === '/blob-debug') {
       try {
-        const embedUrl = u.searchParams.get('embed') || '';
         const slug = u.searchParams.get('slug') || '';
-        if (!slug && !embedUrl) return jsonErr(res, 400, 'provide ?slug=xxx or ?embed=xxx');
+        const watchUrl = u.searchParams.get('watch') || '';
         
         let abyssHtml;
         if (slug) {
           abyssHtml = await fetchWithFallback(`https://abyssplayer.com/${slug}`, 15000);
-        } else {
-          const embHtml = await fetchWithFallback(embedUrl, 15000);
+        } else if (watchUrl) {
+          // Fetch watch page → find embed → find abyssplayer slug
+          const wh = await fetchWithFallback(watchUrl, 15000);
+          if (!wh) return json(res, { error: 'watch page fetch failed' });
+          const em = wh.match(/iframe[^>]*src="(https?:\/\/[^"]*embed[^"]*)"/i);
+          if (!em) return json(res, { error: 'no embed found in watch page' });
+          const embHtml = await fetchWithFallback(em[1], 15000);
           if (!embHtml) return json(res, { error: 'embed fetch failed' });
           const am = embHtml.match(/abyssplayer\.com\/([a-zA-Z0-9]+)/);
-          if (!am) return json(res, { error: 'no abyssplayer slug' });
+          if (!am) return json(res, { error: 'no abyssplayer slug', embedSnippet: embHtml.substring(0, 500) });
           abyssHtml = await fetchWithFallback(`https://abyssplayer.com/${am[1]}`, 15000);
+        } else {
+          return jsonErr(res, 400, 'provide ?slug=xxx or ?watch=url');
         }
         if (!abyssHtml) return json(res, { error: 'abyssplayer fetch failed' });
         
         const dm = abyssHtml.match(/const datas = "([^"]+)"/);
-        if (!dm) return json(res, { error: 'no datas found' });
+        if (!dm) return json(res, { error: 'no datas found', snippet: abyssHtml.substring(0, 500) });
         
         const blob = JSON.parse(Buffer.from(dm[1], 'base64').toString('latin1'));
         const keyStr = `${blob.user_id}:${blob.slug}:${blob.md5_id}`;
