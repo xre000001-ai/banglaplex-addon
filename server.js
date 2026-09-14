@@ -460,17 +460,85 @@ function parseWatch(html, url) {
 
 function he(s) { return s.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#039;/g, "'").replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n, 10)); }
 
+// ─── AES-CTR decrypt for abyssplayer media blob ─────────────────────────────
+const tls = require('node:tls');
+const crypto2 = require('node:crypto');
+
+function b64Pad(s) { const r = s.length % 4; return r ? s + '='.repeat(4 - r) : s; }
+
+async function decryptAbyssMedia(blob, keyStr) {
+  try {
+    const md5hex = crypto2.createHash('md5').update(keyStr).digest('hex');
+    const keyBytes = new TextEncoder().encode(md5hex);
+    const counter = new Uint8Array(keyBytes.slice(0, 16));
+    const encBytes = new Uint8Array(blob.media.length);
+    for (let i = 0; i < blob.media.length; i++) encBytes[i] = blob.media.charCodeAt(i);
+    const key = await crypto2.webcrypto.subtle.importKey('raw', keyBytes, { name: 'AES-CTR', length: 128 }, false, ['decrypt']);
+    const algo = { name: 'AES-CTR', counter, length: 128 };
+    const dec = await crypto2.webcrypto.subtle.decrypt(algo, key, encBytes);
+    return JSON.parse(new TextDecoder().decode(dec));
+  } catch (e) { return null; }
+}
+
+// ─── Full embed resolution: plextream → abyssplayer → decrypt → direct URLs ──
 async function resolveEmbed(embedUrl) {
   if (!embedUrl) return [];
+  // Step 1: fetch plextream embed page to find abyssplayer iframe
   const html = await fetchWithFallback(embedUrl, 15000);
   if (!html) return [];
-  const servers = [];
-  const re = /(?:changeServer|src)\s*[\(=]?\s*['"]?(https?:\/\/[^'")\s]+)/g;
-  let m;
-  while ((m = re.exec(html))) { const u = m[1]; if (u && !/gstatic|google|cloudflare|recaptcha/.test(u)) servers.push(u); }
-  const ir = /iframe[^>]*src="(https?:\/\/[^"]+)"/g;
-  while ((m = ir.exec(html))) { if (!/gstatic|google|cloudflare|recaptcha/.test(m[1])) servers.push(m[1]); }
-  return [...new Set(servers)];
+
+  // Find abyssplayer iframe slug
+  const abyssMatch = html.match(/abyssplayer\.com\/([a-zA-Z0-9]+)/);
+  if (!abyssMatch) {
+    // Fallback: extract any playable URLs from the page
+    const servers = [];
+    const ir = /iframe[^>]*src="(https?:\/\/[^"]+)"/g;
+    let m;
+    while ((m = ir.exec(html))) { if (!/gstatic|google|cloudflare|recaptcha/.test(m[1])) servers.push(m[1]); }
+    return servers;
+  }
+
+  const abyssSlug = abyssMatch[1];
+
+  // Step 2: fetch abyssplayer page
+  const abyssHtml = await fetchWithFallback(`https://abyssplayer.com/${abyssSlug}`, 15000);
+  if (!abyssHtml) return [];
+
+  // Step 3: extract encrypted blob (base64, decoded as latin1!)
+  const datasMatch = abyssHtml.match(/const datas = "([^"]+)"/);
+  if (!datasMatch) return [];
+  let blob;
+  try {
+    blob = JSON.parse(Buffer.from(datasMatch[1], 'base64').toString('latin1'));
+  } catch (e) { return []; }
+
+  // Step 4: derive key and decrypt
+  const keyStr = `${blob.user_id}:${blob.slug}:${blob.md5_id}`;
+  const media = await decryptAbyssMedia(blob, keyStr);
+  if (!media) return [];
+
+  // Step 5: extract direct video URLs from fristDatas or sources
+  const urls = [];
+  const mp4 = media.mp4 || media;
+  if (mp4.fristDatas) {
+    for (const fd of mp4.fristDatas) {
+      if (fd.url) {
+        const codec = fd.codec || 'h264';
+        const quality = fd.res_id <= 2 ? '360p' : fd.res_id <= 4 ? '720p' : '1080p';
+        urls.push({ url: fd.url, quality, codec, size: fd.size });
+      }
+    }
+  }
+  // Fallback: try sources with domain construction
+  if (!urls.length && mp4.sources && mp4.domains) {
+    for (const src of mp4.sources) {
+      if (src.sub && mp4.domains.some(d => d.startsWith(src.sub))) {
+        const domain = mp4.domains.find(d => d.startsWith(src.sub));
+        urls.push({ url: `https://${domain}`, quality: src.label || 'HD', codec: src.codec || 'h264', size: src.size });
+      }
+    }
+  }
+  return urls;
 }
 
 async function searchBP(q) {
@@ -508,12 +576,45 @@ async function resolveStream(type, id, tmdbKey) {
   if (!wh) { const streams = [{ name: '[ BanglaPlex ] HD', title: best.title, url: best.url }]; resolveCache.set(id, { streams, at: Date.now() }); return streams; }
   const info = parseWatch(wh, best.url);
 
-  const servers = await resolveEmbed(info.embedUrl);
-  const streams = (servers.length ? servers : [info.watchUrl]).map((url, i) => ({
-    name: `[ BanglaPlex ] ${info.quality}`,
-    title: `${info.title} (${info.year || '?'})${info.director ? ' · ' + info.director : ''}${servers.length > 1 ? ` [S${i + 1}]` : ''}`,
-    url, poster: info.poster || undefined, behaviorHints: { notWebReady: false, bingeGroup: `bp-${id}` },
-  }));
+  const embedUrls = await resolveEmbed(info.embedUrl);
+  const streams = [];
+  
+  if (embedUrls.length) {
+    // Direct video URLs from decrypted abyssplayer
+    for (const eu of embedUrls) {
+      if (typeof eu === 'string') {
+        streams.push({
+          name: `[ BanglaPlex ] ${info.quality}`,
+          title: `${info.title} (${info.year || '?'})`,
+          url: eu, poster: info.poster || undefined,
+          behaviorHints: { notWebReady: false, bingeGroup: `bp-${id}` },
+        });
+      } else {
+        const qLabel = eu.quality || info.quality;
+        const codecTag = eu.codec && eu.codec !== 'h264' ? ` [${eu.codec.toUpperCase()}]` : '';
+        const sizeStr = eu.size ? ` (${(eu.size / 1e9).toFixed(1)}GB)` : '';
+        // Proxy through server with Referer header (CDN requires abyssplayer referer)
+        // URL is relative — will be resolved by Stremio against the addon base URL
+        const proxyPath = `/proxy?url=${encodeURIComponent(eu.url)}`;
+        streams.push({
+          name: `[ BanglaPlex ] ${qLabel}${codecTag}`,
+          title: `${info.title} (${info.year || '?'})${sizeStr}`,
+          url: proxyPath, poster: info.poster || undefined,
+          behaviorHints: { notWebReady: false, bingeGroup: `bp-${id}` },
+        });
+      }
+    }
+  }
+  
+  if (!streams.length) {
+    // Fallback: use watch page URL
+    streams.push({
+      name: `[ BanglaPlex ] ${info.quality}`,
+      title: `${info.title} (${info.year || '?'})`,
+      url: info.watchUrl,
+      behaviorHints: { notWebReady: true, bingeGroup: `bp-${id}` },
+    });
+  }
 
   resolveCache.set(id, { streams, at: Date.now() });
   return streams;
@@ -604,6 +705,49 @@ async function route(req, res) {
     if (p === '/configure' || p === '/config' || p === '/setup') return htmlPage(res, configurePage());
     if (p === '/validate-key') return json(res, { valid: await validateKey(u.searchParams.get('key') || '') });
 
+    // Video proxy — forwards requests with abyssplayer Referer for CDN access
+    if (p === '/proxy') {
+      const targetUrl = u.searchParams.get('url');
+      if (!targetUrl || !targetUrl.startsWith('https://')) return jsonErr(res, 400, 'missing url');
+      try {
+        const https = require('node:https');
+        const proxyReq = https.request(targetUrl, {
+          headers: {
+            'User-Agent': UA,
+            'Referer': 'https://abyssplayer.com/',
+            'Origin': 'https://abyssplayer.com',
+            'Range': req.headers.range || '',
+          },
+        }, (proxyRes) => {
+          if (proxyRes.statusCode >= 300 && proxyRes.statusCode < 400 && proxyRes.headers.location) {
+            // Follow redirect
+            const redirReq = https.request(proxyRes.headers.location, {
+              headers: { 'User-Agent': UA, 'Referer': 'https://abyssplayer.com/', 'Range': req.headers.range || '' },
+            }, (redirRes) => {
+              const headers = { 'Content-Type': redirRes.headers['content-type'] || 'application/octet-stream', 'Access-Control-Allow-Origin': '*' };
+              if (redirRes.headers['content-length']) headers['Content-Length'] = redirRes.headers['content-length'];
+              if (redirRes.headers['content-range']) headers['Content-Range'] = redirRes.headers['content-range'];
+              if (redirRes.headers['accept-ranges']) headers['Accept-Ranges'] = redirRes.headers['accept-ranges'];
+              res.writeHead(redirRes.statusCode, headers);
+              redirRes.pipe(res);
+            });
+            redirReq.on('error', () => jsonErr(res, 502, 'proxy error'));
+            redirReq.end();
+            return;
+          }
+          const headers = { 'Content-Type': proxyRes.headers['content-type'] || 'application/octet-stream', 'Access-Control-Allow-Origin': '*' };
+          if (proxyRes.headers['content-length']) headers['Content-Length'] = proxyRes.headers['content-length'];
+          if (proxyRes.headers['content-range']) headers['Content-Range'] = proxyRes.headers['content-range'];
+          if (proxyRes.headers['accept-ranges']) headers['Accept-Ranges'] = proxyRes.headers['accept-ranges'];
+          res.writeHead(proxyRes.statusCode, headers);
+          proxyRes.pipe(res);
+        });
+        proxyReq.on('error', () => jsonErr(res, 502, 'proxy error'));
+        proxyReq.end();
+      } catch (e) { jsonErr(res, 502, 'proxy: ' + e.message); }
+      return;
+    }
+
     const seg = raw.split('/').filter(Boolean);
     let tmdbKey = '', pp = p;
     if (seg.length >= 1 && /^[a-f0-9]{32}$/i.test(decodeURIComponent(seg[0]))) { tmdbKey = decodeURIComponent(seg[0]); pp = '/' + seg.slice(1).join('/'); }
@@ -614,7 +758,17 @@ async function route(req, res) {
     if (cm) { const ex = {}; for (const [k, v] of u.searchParams) ex[k] = v; return json(res, await handleCatalog(cm[1], cm[2], ex, tmdbKey)); }
 
     const sm = pp.match(/^\/stream\/(movie|series)\/(.+)\.json$/);
-    if (sm) return json(res, { streams: await resolveStream(sm[1], sm[2], tmdbKey) });
+    if (sm) {
+      const proto = req.headers['x-forwarded-proto'] || 'https';
+      const host = req.headers.host || 'localhost';
+      const base = `${proto}://${host}`;
+      const streams = await resolveStream(sm[1], sm[2], tmdbKey);
+      // Make proxy URLs absolute
+      for (const s of streams) {
+        if (s.url && s.url.startsWith('/proxy')) s.url = base + s.url;
+      }
+      return json(res, { streams });
+    }
 
     // Debug endpoint
     if (pp === '/debug') {

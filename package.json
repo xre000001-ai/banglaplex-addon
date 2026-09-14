@@ -10,6 +10,16 @@
   "engines": {
     "node": ">=18"
   },
-  "keywords": ["stremio", "addon", "banglaplex", "bengali", "streaming"],
-  "license": "MIT"
+  "keywords": [
+    "stremio",
+    "addon",
+    "banglaplex",
+    "bengali",
+    "streaming"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "playwright-core": "^1.63.0",
+    "puppeteer-core": "^25.11.0"
+  }
 }
