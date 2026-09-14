@@ -23,7 +23,7 @@ const PORT = parseInt(process.env.PORT, 10) || 7000;
 const TMDB_BASE = 'https://api.themoviedb.org/3';
 const TMDB_SPACING_MS = 300;
 
-const BP_DOMAINS = ['https://banglaplex.biz', 'https://banglaplex.me', 'https://banglaplex.space', 'https://banglaplex.life'];
+const BP_DOMAINS = ['https://banglaplex.biz', 'https://banglaplex.life', 'https://banglaplex.me', 'https://banglaplex.space'];
 const BP_OVERRIDE = process.env.BANGLAPLEX_URL || '';
 
 // ─── Free Proxy Pool (moviebox-stremio architecture) ─────────────────────────
@@ -344,15 +344,28 @@ async function raceSearch(type, title, year, key) {
 async function detectDomain() {
   if (BP_OVERRIDE) { BP_BASE = BP_OVERRIDE.replace(/\/+$/, ''); return; }
   for (const d of BP_DOMAINS) {
-    const h = await fetchWithFallback(d + '/', 8000);
-    if (h && (h.includes('BanglaPlex') || h.includes('banglaplex'))) {
-      const c = h.match(/canonical.*?href="([^"]+)"/);
-      BP_BASE = c ? new URL(c[1]).origin : d;
-      console.log(`BanglaPlex: ${BP_BASE}`);
-      return;
+    try {
+      // Verify autocomplete API actually works (not just a landing page)
+      const testUrl = `${d}//home/autocompleteajax?term=test`;
+      const data = await fetchJSON(testUrl, 8000);
+      if (Array.isArray(data) && data.length > 0) {
+        BP_BASE = d;
+        console.log(`BanglaPlex: ${BP_BASE} (autocomplete OK, ${data.length} results)`);
+        return;
+      }
+      // Fallback: check for actual watch links (not just landing page)
+      const h = await fetchWithFallback(d + '/', 8000);
+      if (h && h.includes('/watch/') && h.includes('movie-container')) {
+        BP_BASE = d;
+        console.log(`BanglaPlex: ${BP_BASE} (content detected)`);
+        return;
+      }
+    } catch (e) {
+      console.warn(`BanglaPlex ${d}: ${e.message}`);
     }
   }
   BP_BASE = BP_DOMAINS[0];
+  console.warn(`BanglaPlex: fallback to ${BP_BASE}`);
 }
 
 function parseMovieList(html) {
