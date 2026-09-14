@@ -14,43 +14,50 @@ Stremio addon for **BanglaPlex** — Bengali, Bollywood, South Indian & Hollywoo
 
 ## Install
 
+### 1. Configure (Recommended)
+
+Open `http://YOUR_SERVER:7000/configure` in your browser:
+
+1. Enter your **free TMDB API key** (get one at [themoviedb.org/settings/api](https://www.themoviedb.org/settings/api) — 2 minutes)
+2. Click **Install in Stremio**
+3. Done! The key is encoded in the addon URL — **never stored on the server**.
+
 ### Deploy to Render
 
 1. Fork/clone this repo
 2. Connect to Render as a **Web Service**
-3. Set environment variable `TMDB_KEY` (get free key from [themoviedb.org](https://www.themoviedb.org/settings/api))
+3. Set `PORT=7000` (or leave default)
 4. Deploy!
+5. Open `https://YOUR_APP.onrender.com/configure` and enter your TMDB key
 
 ### Deploy anywhere
 
 ```bash
-# Clone
 git clone https://github.com/YOUR_USERNAME/banglaplex-addon.git
 cd banglaplex-addon
 
-# Set TMDB key (optional but recommended for IMDB mapping)
-export TMDB_KEY=your_tmdb_api_key_here
-
-# Run
+# No config needed — users provide their own TMDB key via /configure page
 node server.js
-# → http://localhost:7000
+# → http://localhost:7000/configure
 ```
 
-### Add to Stremio
+### How the key works
 
-Open `http://localhost:7000` in your browser and click **"Add to Stremio"**.
+The TMDB key is encoded in the addon URL: `https://YOUR_SERVER/TMDB_KEY/manifest.json`
 
-Or manually: `stremio://localhost:7000/manifest.json`
+- **Full mode** (with key): catalog browsing + IMDB mapping for Cinemeta integration
+- **Lite mode** (no key): streams work for known tt-ids via Cinemeta fallback, no catalog
+
+Each user provides their own key → **zero TMDB cost on the server**.
 
 ## Environment Variables
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `TMDB_KEY` | Recommended | — | TMDb v3 API key (free at themoviedb.org) |
 | `PORT` | No | `7000` | HTTP server port |
 | `BANGLAPLEX_URL` | No | auto-detected | Override BanglaPlex domain |
-| `TMDB_REGION` | No | `US` | ISO 3166-1 region for streaming service badges |
-| `TMDB_SPACING_MS` | No | `300` | TMDb request spacing (rate limit) |
+
+**Note:** TMDB keys are user-provided via `/configure` page. No server-side TMDB key needed.
 
 ## How It Works
 
