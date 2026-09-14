@@ -18,7 +18,7 @@ const http = require('node:http');
 const { URL } = require('node:url');
 const net = require('node:net');
 
-const CODE_VERSION = '2.1.0';
+const CODE_VERSION = '2.2.0';
 const PORT = parseInt(process.env.PORT, 10) || 7000;
 const TMDB_BASE = 'https://api.themoviedb.org/3';
 const TMDB_SPACING_MS = 300;
@@ -573,7 +573,7 @@ async function resolveStream(type, id, tmdbKey) {
   } else if (id.startsWith('bp_')) {
     const cat = catalogCache.get(tmdbKey || '_');
     const item = cat?.data?.find(c => c.id === id);
-    if (item) { const streams = [{ name: `[ BanglaPlex ] ${item._q}`, title: `${item.name} (${item.year || '?'})`, url: item._u }]; resolveCache.set(id, { streams, at: Date.now() }); return streams; }
+    if (item) { const streams = [{ name: `[ BanglaPlex ] ${item._q}`, title: `${item.name} (${item.year || '?'})`, externalUrl: item._u }]; resolveCache.set(id, { streams, at: Date.now() }); return streams; }
     return [];
   }
   if (!title) return [];
@@ -586,46 +586,43 @@ async function resolveStream(type, id, tmdbKey) {
   let best = results.find(r => { const rn = norm(r.title); return rn === t || rn.includes(t) || t.includes(rn); }) || results[0];
 
   const wh = await fetchWithFallback(best.url, 15000);
-  if (!wh) { const streams = [{ name: '[ BanglaPlex ] HD', title: best.title, url: best.url }]; resolveCache.set(id, { streams, at: Date.now() }); return streams; }
+  if (!wh) { const streams = [{ name: '[ BanglaPlex ] HD', title: best.title, externalUrl: best.url }]; resolveCache.set(id, { streams, at: Date.now() }); return streams; }
   const info = parseWatch(wh, best.url);
 
   const embedUrls = await resolveEmbed(info.embedUrl);
   const streams = [];
   
   if (embedUrls.length) {
-    // Direct video URLs from decrypted abyssplayer
     for (const eu of embedUrls) {
       if (typeof eu === 'string') {
+        // It's an iframe URL - use as externalUrl
         streams.push({
           name: `[ BanglaPlex ] ${info.quality}`,
           title: `${info.title} (${info.year || '?'})`,
-          url: eu, poster: info.poster || undefined,
-          behaviorHints: { notWebReady: false, bingeGroup: `bp-${id}` },
+          externalUrl: eu,
+          poster: info.poster || undefined,
         });
       } else {
         const qLabel = eu.quality || info.quality;
         const codecTag = eu.codec && eu.codec !== 'h264' ? ` [${eu.codec.toUpperCase()}]` : '';
         const sizeStr = eu.size ? ` (${(eu.size / 1e9).toFixed(1)}GB)` : '';
-        // Proxy through server with Referer header (CDN requires abyssplayer referer)
-        // URL is relative — will be resolved by Stremio against the addon base URL
-        const proxyPath = `/proxy?url=${encodeURIComponent(eu.url)}`;
+        // CDN data is encrypted - use watch page URL for playback in browser
         streams.push({
           name: `[ BanglaPlex ] ${qLabel}${codecTag}`,
           title: `${info.title} (${info.year || '?'})${sizeStr}`,
-          url: proxyPath, poster: info.poster || undefined,
-          behaviorHints: { notWebReady: false, bingeGroup: `bp-${id}` },
+          externalUrl: info.watchUrl,
+          poster: info.poster || undefined,
         });
       }
     }
   }
   
   if (!streams.length) {
-    // Fallback: use watch page URL
     streams.push({
       name: `[ BanglaPlex ] ${info.quality}`,
       title: `${info.title} (${info.year || '?'})`,
-      url: info.watchUrl,
-      behaviorHints: { notWebReady: true, bingeGroup: `bp-${id}` },
+      externalUrl: info.watchUrl,
+      poster: info.poster || undefined,
     });
   }
 
