@@ -62,10 +62,31 @@ Each user provides their own key → **zero TMDB cost on the server**.
 ## How It Works
 
 1. **Stream request** — Stremio sends a tt-id (IMDb) for a movie/series
-2. **Title resolution** — TMDB (priority) or Cinemeta (fallback) resolves tt-id → title + year
+2. **3-way race** — IMDb Suggestion API vs TMDB (if key) vs Cinemeta → first valid result wins
 3. **BanglaPlex search** — Autocomplete API finds matching content
 4. **Stream extraction** — Watch page → embed chain → direct playable URL
 5. **Stremio displays** — Stream entry with quality badge + metadata
+
+### Race Architecture (v1.1.0)
+
+```
+Title Resolution:
+  ┌─ IMDb Suggestion API (free, ~200ms) ──── fastest?
+  ├─ TMDB (user key, ~300ms) ─────────────── fastest?
+  └─ Cinemeta (free, ~400ms) ─────────────── fastest?
+  → First valid result wins. Others abandoned.
+
+Catalog IMDB Mapping:
+  ┌─ IMDb Suggestion API (free) ──────────── 19/20 mapped!
+  └─ TMDB (if key provided) ──────────────── service badges
+  → Works WITHOUT TMDB key (IMDb covers almost everything)
+```
+
+### Stream URLs
+
+Stream URLs from BanglaPlex are **NOT IP-bound**:
+- `abyssplayer.com/bY4p5uiA2` — static URL, no token/expiry/IP params
+- Works from any client (server, user device, proxy)
 
 ## API
 
