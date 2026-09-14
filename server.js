@@ -185,6 +185,7 @@ function shuffle(arr) {
 let BP_BASE = '';
 const resolveCache = new Map();
 const CACHE_TTL = 30 * 60 * 1000;
+const lastBlobCache = {};  // Stores last decrypted blob for debugging
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -521,6 +522,12 @@ async function resolveEmbed(embedUrl) {
   // Step 5: extract direct video URLs from fristDatas or sources
   const urls = [];
   const mp4 = media.mp4 || media;
+  
+  // Cache the full blob for debugging
+  lastBlobCache.media = media;
+  lastBlobCache.blob = { user_id: blob.user_id, slug: blob.slug, md5_id: blob.md5_id };
+  lastBlobCache.keyStr = keyStr;
+  
   if (mp4.fristDatas) {
     for (const fd of mp4.fristDatas) {
       if (fd.url) {
@@ -838,8 +845,11 @@ async function route(req, res) {
           const am = embHtml.match(/abyssplayer\.com\/([a-zA-Z0-9]+)/);
           if (!am) return json(res, { error: 'no abyssplayer slug', embedSnippet: embHtml.substring(0, 500) });
           abyssHtml = await fetchWithFallback(`https://abyssplayer.com/${am[1]}`, 15000);
+        } else if (lastBlobCache.media) {
+          // Return cached blob from last stream resolution
+          return json(res, lastBlobCache);
         } else {
-          return jsonErr(res, 400, 'provide ?slug=xxx or ?watch=url');
+          return jsonErr(res, 400, 'provide ?slug=xxx, ?watch=url, or call /stream first');
         }
         if (!abyssHtml) return json(res, { error: 'abyssplayer fetch failed' });
         
