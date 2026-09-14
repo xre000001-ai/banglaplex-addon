@@ -484,10 +484,10 @@ async function decryptAbyssMedia(blob, keyStr) {
 
 // ─── Full embed resolution: plextream → abyssplayer → decrypt → direct URLs ──
 async function resolveEmbed(embedUrl) {
-  if (!embedUrl) return [];
+  if (!embedUrl) return { slug: null, urls: [] };
   // Step 1: fetch plextream embed page to find abyssplayer iframe
   const html = await fetchWithFallback(embedUrl, 15000);
-  if (!html) return [];
+  if (!html) return { slug: null, urls: [] };
 
   // Find abyssplayer iframe slug
   const abyssMatch = html.match(/abyssplayer\.com\/([a-zA-Z0-9]+)/);
@@ -497,27 +497,27 @@ async function resolveEmbed(embedUrl) {
     const ir = /iframe[^>]*src="(https?:\/\/[^"]+)"/g;
     let m;
     while ((m = ir.exec(html))) { if (!/gstatic|google|cloudflare|recaptcha/.test(m[1])) servers.push(m[1]); }
-    return servers;
+    return { slug: null, urls: servers };
   }
 
   const abyssSlug = abyssMatch[1];
 
   // Step 2: fetch abyssplayer page
   const abyssHtml = await fetchWithFallback(`https://abyssplayer.com/${abyssSlug}`, 15000);
-  if (!abyssHtml) return [];
+  if (!abyssHtml) return { slug: abyssSlug, urls: [] };
 
   // Step 3: extract encrypted blob (base64, decoded as latin1!)
   const datasMatch = abyssHtml.match(/const datas = "([^"]+)"/);
-  if (!datasMatch) return [];
+  if (!datasMatch) return { slug: abyssSlug, urls: [] };
   let blob;
   try {
     blob = JSON.parse(Buffer.from(datasMatch[1], 'base64').toString('latin1'));
-  } catch (e) { return []; }
+  } catch (e) { return { slug: abyssSlug, urls: [] }; }
 
   // Step 4: derive key and decrypt
   const keyStr = `${blob.user_id}:${blob.slug}:${blob.md5_id}`;
   const media = await decryptAbyssMedia(blob, keyStr);
-  if (!media) return [];
+  if (!media) return { slug: abyssSlug, urls: [] };
 
   // Step 5: extract direct video URLs from fristDatas or sources
   const urls = [];
@@ -527,6 +527,7 @@ async function resolveEmbed(embedUrl) {
   lastBlobCache.media = media;
   lastBlobCache.blob = { user_id: blob.user_id, slug: blob.slug, md5_id: blob.md5_id };
   lastBlobCache.keyStr = keyStr;
+  lastBlobCache.abyssSlug = abyssSlug;
   
   if (mp4.fristDatas) {
     for (const fd of mp4.fristDatas) {
@@ -546,7 +547,7 @@ async function resolveEmbed(embedUrl) {
       }
     }
   }
-  return urls;
+  return { slug: abyssSlug, urls };
 }
 
 async function searchBP(q) {
@@ -589,8 +590,12 @@ async function resolveStream(type, id, tmdbKey) {
   if (!wh) { const streams = [{ name: '[ BanglaPlex ] HD', title: best.title, externalUrl: best.url }]; resolveCache.set(id, { streams, at: Date.now() }); return streams; }
   const info = parseWatch(wh, best.url);
 
-  const embedUrls = await resolveEmbed(info.embedUrl);
+  const embedResult = await resolveEmbed(info.embedUrl);
+  const { slug: abyssSlug, urls: embedUrls } = embedResult;
   const streams = [];
+  
+  // Determine the best externalUrl — abyssplayer direct > watch page
+  const playerUrl = abyssSlug ? `https://abyssplayer.com/${abyssSlug}` : info.watchUrl;
   
   if (embedUrls.length) {
     for (const eu of embedUrls) {
@@ -606,11 +611,11 @@ async function resolveStream(type, id, tmdbKey) {
         const qLabel = eu.quality || info.quality;
         const codecTag = eu.codec && eu.codec !== 'h264' ? ` [${eu.codec.toUpperCase()}]` : '';
         const sizeStr = eu.size ? ` (${(eu.size / 1e9).toFixed(1)}GB)` : '';
-        // CDN data is encrypted - use watch page URL for playback in browser
+        // CDN data is encrypted — open abyssplayer directly in browser (service worker decrypts)
         streams.push({
           name: `[ BanglaPlex ] ${qLabel}${codecTag}`,
           title: `${info.title} (${info.year || '?'})${sizeStr}`,
-          externalUrl: info.watchUrl,
+          externalUrl: playerUrl,
           poster: info.poster || undefined,
         });
       }
@@ -621,7 +626,7 @@ async function resolveStream(type, id, tmdbKey) {
     streams.push({
       name: `[ BanglaPlex ] ${info.quality}`,
       title: `${info.title} (${info.year || '?'})`,
-      externalUrl: info.watchUrl,
+      externalUrl: playerUrl,
       poster: info.poster || undefined,
     });
   }
@@ -871,6 +876,29 @@ async function route(req, res) {
       cache: resolveCache.size, uptime: Math.round(process.uptime()),
     });
 
+    // Player page — embeds abyssplayer in an iframe for browser playback
+    const pm = p.match(/^\/player\/([a-zA-Z0-9]+)$/);
+    if (pm) {
+      const slug = pm[1];
+      const playerHtml = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BanglaPlex Player</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; display: flex; align-items: center; justify-content: center; height: 100vh; }
+    iframe { width: 100%; height: 100%; border: none; }
+  </style>
+</head>
+<body>
+  <iframe src="https://abyssplayer.com/${slug}" allowfullscreen allow="autoplay; encrypted-media; fullscreen"></iframe>
+</body>
+</html>`;
+      return htmlPage(res, playerHtml);
+    }
+
     if (p === '/' || p === '') return htmlPage(res, `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BanglaPlex</title>
 <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,sans-serif;background:#0a0a0b;color:#fff;min-height:100vh;display:flex;align-items:center;justify-content:center}.c{background:#16161a;border:1px solid #2a2a30;border-radius:16px;padding:40px;max-width:480px;text-align:center}h1{font-size:28px;color:#ff277d;margin-bottom:8px}p{color:#888;margin-bottom:16px}.bd{display:inline-block;background:#ff277d;color:#fff;padding:4px 12px;border-radius:20px;font-size:13px;margin:4px}a.b{display:inline-block;background:#ff277d;color:#fff;padding:12px 32px;border-radius:8px;font-size:16px;font-weight:600;margin-top:16px;text-decoration:none}pre{background:#1a1a20;padding:12px;border-radius:8px;text-align:left;font-size:13px;margin-top:16px;color:#aaa}</style></head><body>
 <div class="c"><h1>🎬 BanglaPlex</h1><p>Zero bandwidth · Free proxy pool · Direct streams</p>
@@ -893,3 +921,5 @@ async function start() {
   http.createServer(route).listen(PORT, '0.0.0.0', () => console.log(`Ready on :${PORT}`));
 }
 start().catch(e => { console.error(e); process.exit(1); });
+
+
