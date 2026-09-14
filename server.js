@@ -200,32 +200,15 @@ function htmlPage(res, body) { res.writeHead(200, { 'Content-Type': 'text/html; 
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
 
-// CORS proxy services — reliable fallback when server IP is blocked
-const CORS_PROXIES = [
-  (url) => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url),
-  (url) => 'https://corsproxy.io/?' + encodeURIComponent(url),
-  (url) => 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(url),
-];
-
 async function fetchWithFallback(url, timeoutMs = 12000) {
   // Try direct first
   let result = await doFetch(url, null, timeoutMs);
   if (result) return result;
 
-  // Try CORS proxy services (reliable, work from any server)
-  for (const proxyFn of CORS_PROXIES) {
-    result = await doFetch(proxyFn(url), null, timeoutMs);
+  // Fallback: HTTP CONNECT tunnel through free proxy pool
+  if (url.startsWith('https://')) {
+    result = await tunnelFetchWithPool(url, timeoutMs);
     if (result) return result;
-  }
-
-  // Try pool proxies (free, less reliable)
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const proxy = poolPick();
-    if (!proxy) break;
-    const start = Date.now();
-    result = await doFetch(proxy.replace(/\/+$/, '') + '/' + url, null, timeoutMs);
-    if (result) { poolNote(proxy, true, Date.now() - start); return result; }
-    poolNote(proxy, false);
   }
   return null;
 }
@@ -243,6 +226,80 @@ async function doFetch(url, _unused, timeoutMs) {
     return await r.text();
   } catch { return null; }
   finally { clearTimeout(t); }
+}
+
+// HTTP CONNECT tunnel — for when server IP is blocked by BanglaPlex
+// Routes HTTPS requests through free proxy via CONNECT tunneling
+function tunnelFetch(proxyUrl, targetUrl, timeoutMs = 15000) {
+  const net = require('net');
+  const tls = require('tls');
+  return new Promise((resolve, reject) => {
+    const pu = new URL(proxyUrl);
+    const tu = new URL(targetUrl);
+    const ctrl = setTimeout(() => { sock.destroy(); reject(new Error('timeout')); }, timeoutMs);
+    const sock = net.createConnection({ host: pu.hostname, port: parseInt(pu.port) || 80 });
+    sock.on('error', (e) => { clearTimeout(ctrl); reject(e); });
+    sock.on('connect', () => {
+      sock.write('CONNECT ' + tu.hostname + ':443 HTTP/1.1\r\nHost: ' + tu.hostname + ':443\r\n\r\n');
+      let buf = '';
+      const onConnect = (chunk) => {
+        buf += chunk.toString();
+        if (!buf.includes('\r\n\r\n')) return;
+        sock.removeListener('data', onConnect);
+        if (!buf.startsWith('HTTP/1.1 200')) {
+          clearTimeout(ctrl); sock.destroy();
+          return reject(new Error('CONNECT: ' + buf.split('\r\n')[0]));
+        }
+        const tlsSock = tls.connect({ socket: sock, servername: tu.hostname, rejectUnauthorized: false }, () => {
+          const path = tu.pathname + tu.search;
+          tlsSock.write('GET ' + path + ' HTTP/1.1\r\nHost: ' + tu.hostname + '\r\nUser-Agent: ' + UA + '\r\nAccept: */*\r\nConnection: close\r\n\r\n');
+          let resp = '';
+          tlsSock.on('data', (d) => { resp += d.toString(); });
+          tlsSock.on('end', () => {
+            clearTimeout(ctrl);
+            const parts = resp.split('\r\n\r\n');
+            let body = parts.slice(1).join('\r\n\r\n');
+            // Decode chunked
+            if (parts[0].toLowerCase().includes('transfer-encoding: chunked')) {
+              let decoded = '', pos = 0;
+              while (pos < body.length) {
+                const le = body.indexOf('\r\n', pos);
+                if (le === -1) break;
+                const sz = parseInt(body.slice(pos, le), 16);
+                if (!sz) break;
+                pos = le + 2;
+                decoded += body.slice(pos, pos + sz);
+                pos += sz + 2;
+              }
+              body = decoded;
+            }
+            resolve(body);
+          });
+        });
+        tlsSock.on('error', (e) => { clearTimeout(ctrl); reject(e); });
+      };
+      sock.on('data', onConnect);
+    });
+  });
+}
+
+async function tunnelFetchWithPool(url, timeoutMs = 15000) {
+  // Try up to 5 proxies from the pool
+  const tried = new Set();
+  for (let i = 0; i < 5; i++) {
+    const proxy = poolPick();
+    if (!proxy || tried.has(proxy)) continue;
+    tried.add(proxy);
+    try {
+      const start = Date.now();
+      const body = await tunnelFetch(proxy, url, timeoutMs);
+      poolNote(proxy, true, Date.now() - start);
+      return body;
+    } catch (e) {
+      poolNote(proxy, false);
+    }
+  }
+  return null;
 }
 
 async function fetchJSON(url, timeoutMs = 10000) {
