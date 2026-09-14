@@ -18,7 +18,7 @@ const http = require('node:http');
 const { URL } = require('node:url');
 const net = require('node:net');
 
-const CODE_VERSION = '2.2.0';
+const CODE_VERSION = '2.3.0';
 const PORT = parseInt(process.env.PORT, 10) || 7000;
 const TMDB_BASE = 'https://api.themoviedb.org/3';
 const TMDB_SPACING_MS = 300;
@@ -490,7 +490,7 @@ async function resolveEmbed(embedUrl) {
 
   // Extract ALL server URLs from changeServer() onclick handlers
   const servers = [];
-  const serverRe = /changeServer\('(https?:\/\/[^']+)',\s*this\)\s*">\s*(?:<[^>]+>)?\s*(Server\s*\d+)/gi;
+  const serverRe = /changeServer\('(https?:\/\/[^']+)',\s*this\)[\s\S]*?(Server\s*\d+)/gi;
   let m;
   while ((m = serverRe.exec(html))) {
     servers.push({ url: m[1], label: m[2].trim() });
