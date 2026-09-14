@@ -482,72 +482,25 @@ async function decryptAbyssMedia(blob, keyStr) {
   } catch (e) { return null; }
 }
 
-// ─── Full embed resolution: plextream → abyssplayer → decrypt → direct URLs ──
+// ─── Full embed resolution: plextream → ALL servers ──────────────────────────
 async function resolveEmbed(embedUrl) {
-  if (!embedUrl) return { slug: null, urls: [] };
-  // Step 1: fetch plextream embed page to find abyssplayer iframe
+  if (!embedUrl) return { servers: [], abyssSlug: null };
   const html = await fetchWithFallback(embedUrl, 15000);
-  if (!html) return { slug: null, urls: [] };
+  if (!html) return { servers: [], abyssSlug: null };
 
-  // Find abyssplayer iframe slug
+  // Extract ALL server URLs from changeServer() onclick handlers
+  const servers = [];
+  const serverRe = /changeServer\('(https?:\/\/[^']+)',\s*this\)\s*">\s*(?:<[^>]+>)?\s*(Server\s*\d+)/gi;
+  let m;
+  while ((m = serverRe.exec(html))) {
+    servers.push({ url: m[1], label: m[2].trim() });
+  }
+
+  // Also detect abyssplayer slug
   const abyssMatch = html.match(/abyssplayer\.com\/([a-zA-Z0-9]+)/);
-  if (!abyssMatch) {
-    // Fallback: extract any playable URLs from the page
-    const servers = [];
-    const ir = /iframe[^>]*src="(https?:\/\/[^"]+)"/g;
-    let m;
-    while ((m = ir.exec(html))) { if (!/gstatic|google|cloudflare|recaptcha/.test(m[1])) servers.push(m[1]); }
-    return { slug: null, urls: servers };
-  }
+  const abyssSlug = abyssMatch ? abyssMatch[1] : null;
 
-  const abyssSlug = abyssMatch[1];
-
-  // Step 2: fetch abyssplayer page
-  const abyssHtml = await fetchWithFallback(`https://abyssplayer.com/${abyssSlug}`, 15000);
-  if (!abyssHtml) return { slug: abyssSlug, urls: [] };
-
-  // Step 3: extract encrypted blob (base64, decoded as latin1!)
-  const datasMatch = abyssHtml.match(/const datas = "([^"]+)"/);
-  if (!datasMatch) return { slug: abyssSlug, urls: [] };
-  let blob;
-  try {
-    blob = JSON.parse(Buffer.from(datasMatch[1], 'base64').toString('latin1'));
-  } catch (e) { return { slug: abyssSlug, urls: [] }; }
-
-  // Step 4: derive key and decrypt
-  const keyStr = `${blob.user_id}:${blob.slug}:${blob.md5_id}`;
-  const media = await decryptAbyssMedia(blob, keyStr);
-  if (!media) return { slug: abyssSlug, urls: [] };
-
-  // Step 5: extract direct video URLs from fristDatas or sources
-  const urls = [];
-  const mp4 = media.mp4 || media;
-  
-  // Cache the full blob for debugging
-  lastBlobCache.media = media;
-  lastBlobCache.blob = { user_id: blob.user_id, slug: blob.slug, md5_id: blob.md5_id };
-  lastBlobCache.keyStr = keyStr;
-  lastBlobCache.abyssSlug = abyssSlug;
-  
-  if (mp4.fristDatas) {
-    for (const fd of mp4.fristDatas) {
-      if (fd.url) {
-        const codec = fd.codec || 'h264';
-        const quality = fd.res_id <= 2 ? '360p' : fd.res_id <= 4 ? '720p' : '1080p';
-        urls.push({ url: fd.url, quality, codec, size: fd.size });
-      }
-    }
-  }
-  // Fallback: try sources with domain construction
-  if (!urls.length && mp4.sources && mp4.domains) {
-    for (const src of mp4.sources) {
-      if (src.sub && mp4.domains.some(d => d.startsWith(src.sub))) {
-        const domain = mp4.domains.find(d => d.startsWith(src.sub));
-        urls.push({ url: `https://${domain}`, quality: src.label || 'HD', codec: src.codec || 'h264', size: src.size });
-      }
-    }
-  }
-  return { slug: abyssSlug, urls };
+  return { servers, abyssSlug };
 }
 
 async function searchBP(q) {
@@ -591,42 +544,49 @@ async function resolveStream(type, id, tmdbKey) {
   const info = parseWatch(wh, best.url);
 
   const embedResult = await resolveEmbed(info.embedUrl);
-  const { slug: abyssSlug, urls: embedUrls } = embedResult;
+  const { servers, abyssSlug } = embedResult;
   const streams = [];
   
-  // Determine the best externalUrl — abyssplayer direct > watch page
-  const playerUrl = abyssSlug ? `https://abyssplayer.com/${abyssSlug}` : info.watchUrl;
-  
-  if (embedUrls.length) {
-    for (const eu of embedUrls) {
-      if (typeof eu === 'string') {
-        // It's an iframe URL - use as externalUrl
-        streams.push({
-          name: `[ BanglaPlex ] ${info.quality}`,
-          title: `${info.title} (${info.year || '?'})`,
-          externalUrl: eu,
-          poster: info.poster || undefined,
-        });
+  // For each server from the plextream embed, create a stream entry
+  if (servers.length) {
+    for (const srv of servers) {
+      // Label like "Server 1", "Server 3" etc.
+      const srvName = srv.label.replace(/Server\s*/i, 'S');
+      
+      // Determine display name based on server type
+      let displayName;
+      if (srv.url.includes('abyssplayer')) {
+        displayName = `[ BanglaPlex ] Abyss ${info.quality}`;
+      } else if (srv.url.includes('strp2p')) {
+        displayName = `[ BanglaPlex ] P2P ${info.quality}`;
+      } else if (srv.url.includes('rpmvid')) {
+        displayName = `[ BanglaPlex ] Direct ${info.quality}`;
       } else {
-        const qLabel = eu.quality || info.quality;
-        const codecTag = eu.codec && eu.codec !== 'h264' ? ` [${eu.codec.toUpperCase()}]` : '';
-        const sizeStr = eu.size ? ` (${(eu.size / 1e9).toFixed(1)}GB)` : '';
-        // CDN data is encrypted — open abyssplayer directly in browser (service worker decrypts)
-        streams.push({
-          name: `[ BanglaPlex ] ${qLabel}${codecTag}`,
-          title: `${info.title} (${info.year || '?'})${sizeStr}`,
-          externalUrl: playerUrl,
-          poster: info.poster || undefined,
-        });
+        displayName = `[ BanglaPlex ] ${srvName} ${info.quality}`;
       }
+      
+      streams.push({
+        name: displayName,
+        title: `${info.title} (${info.year || '?'}) [${srv.label}]`,
+        externalUrl: srv.url,
+        poster: info.poster || undefined,
+      });
     }
+  } else if (abyssSlug) {
+    // Fallback: only abyssplayer slug found
+    streams.push({
+      name: `[ BanglaPlex ] ${info.quality}`,
+      title: `${info.title} (${info.year || '?'})`,
+      externalUrl: `https://abyssplayer.com/${abyssSlug}`,
+      poster: info.poster || undefined,
+    });
   }
   
   if (!streams.length) {
     streams.push({
       name: `[ BanglaPlex ] ${info.quality}`,
       title: `${info.title} (${info.year || '?'})`,
-      externalUrl: playerUrl,
+      externalUrl: info.watchUrl,
       poster: info.poster || undefined,
     });
   }
