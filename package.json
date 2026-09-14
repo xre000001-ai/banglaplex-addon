@@ -1,0 +1,15 @@
+{
+  "name": "banglaplex-addon",
+  "version": "1.0.0",
+  "description": "Stremio addon for BanglaPlex — Bengali, Bollywood, South Indian & Hollywood streams",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": ["stremio", "addon", "banglaplex", "bengali", "bollywood", "streaming"],
+  "license": "MIT"
+}
