@@ -553,22 +553,30 @@ async function resolveStream(type, id, tmdbKey) {
       // Label like "Server 1", "Server 3" etc.
       const srvName = srv.label.replace(/Server\s*/i, 'S');
       
-      // Determine display name based on server type
-      let displayName;
+      // Determine display name and URL based on server type
+      let displayName, streamUrl;
       if (srv.url.includes('abyssplayer')) {
+        // abyssplayer redirects to abyss.to when opened directly (not in iframe)
+        // Use our /player/ endpoint which loads it in an iframe (no redirect)
+        const abyssSlugMatch = srv.url.match(/abyssplayer\.com\/([a-zA-Z0-9]+)/);
+        const slug = abyssSlugMatch ? abyssSlugMatch[1] : null;
         displayName = `[ BanglaPlex ] Abyss ${info.quality}`;
+        streamUrl = slug ? `https://banglaplex-addon.onrender.com/player/${slug}` : srv.url;
       } else if (srv.url.includes('strp2p')) {
         displayName = `[ BanglaPlex ] P2P ${info.quality}`;
+        streamUrl = srv.url;
       } else if (srv.url.includes('rpmvid')) {
         displayName = `[ BanglaPlex ] Direct ${info.quality}`;
+        streamUrl = srv.url;
       } else {
         displayName = `[ BanglaPlex ] ${srvName} ${info.quality}`;
+        streamUrl = srv.url;
       }
       
       streams.push({
         name: displayName,
         title: `${info.title} (${info.year || '?'}) [${srv.label}]`,
-        externalUrl: srv.url,
+        externalUrl: streamUrl,
         poster: info.poster || undefined,
       });
     }
@@ -577,7 +585,7 @@ async function resolveStream(type, id, tmdbKey) {
     streams.push({
       name: `[ BanglaPlex ] ${info.quality}`,
       title: `${info.title} (${info.year || '?'})`,
-      externalUrl: `https://abyssplayer.com/${abyssSlug}`,
+      externalUrl: `https://banglaplex-addon.onrender.com/player/${abyssSlug}`,
       poster: info.poster || undefined,
     });
   }
